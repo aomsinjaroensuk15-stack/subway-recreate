@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TV Runner — Wave to Play</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#0d0d1a; overflow:hidden;
+    font-family:'Segoe UI',Tahoma,sans-serif; }
+  canvas { display:block; }
+  #hud { position:fixed; top:2vh; left:3vw; color:#fff;
+    font-size:3vw; font-weight:700; text-shadow:0 0 1vw #000;
+    user-select:none; }
+  #hint { position:fixed; bottom:3vh; left:50%; transform:translateX(-50%);
+    color:rgba(255,255,255,.75); font-size:2vw; text-align:center;
+    text-shadow:0 0 1vw #000; user-select:none; transition:opacity .5s; }
+  #gesture { position:fixed; bottom:9vh; left:50%; transform:translateX(-50%);
+    width:24vw; height:1vw; background:rgba(255,255,255,.15);
+    border-radius:1vw; overflow:hidden; }
+  #gbar { height:100%; width:50%; background:#7b7bff; transition:width .1s; }
+  #flash { position:fixed; inset:0; background:#ff5c7a; opacity:0;
+    pointer-events:none; transition:opacity .3s; }
+  #overlay { position:fixed; inset:0; background:rgba(5,5,15,.88);
+    display:none; flex-direction:column; align-items:center;
+    justify-content:center; gap:4vh; z-index:10; }
+  #overlay.show { display:flex; }
+  #ovtitle { color:#fff; font-size:8vw; font-weight:800; }
+  #ovscore { color:#aab; font-size:4vw; }
+  #restart { font-size:3.5vw; padding:3vh 6vw; border-radius:2vw;
+    background:#3d3d8f; border:.3vw solid #7b7bff; color:#fff;
+    font-weight:700; user-select:none; }
+  #restart.hovered { background:#5b5bd8; transform:scale(1.07); }
+  #fsbtn { position:fixed; bottom:2vh; right:2vw; font-size:1.8vw;
+    padding:1.5vh 2vw; background:#222; color:#889;
+    border:.2vw solid #445; border-radius:1vw; user-select:none; z-index:5; }
+</style>
+<base target="_blank">
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud">🏃 0m</div>
+<div id="gesture"><div id="gbar"></div></div>
+<div id="hint">🪄 wave the remote: ← → change lane · ↑ jump · ↓ roll</div>
+<div id="flash"></div>
+<div id="overlay">
+  <div id="ovtitle">💥 Crash!</div>
+  <div id="ovscore"></div>
+  <div id="restart">🔁 Restart</div>
+</div>
+<div id="fsbtn">⛶</div>
+
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let W, H;
+function resize(){ W=cv.width=innerWidth; H=cv.height=innerHeight; }
+addEventListener('resize', resize); resize();
+
+const HORIZON = () => H*0.38, GROUND = () => H*0.86, FOV = 260;
+const scale = z => FOV/(FOV+z);
+const sX = (lane,z) => W/2 + lane*W*0.09*scale(z)*4;
+const sY = z => HORIZON() + (GROUND()-HORIZON())*scale(z);
+
+let player, obstacles, dist, speed, running, spawnT, rollT;
+
+function reset(){
+  player = { lane:0, y:0, vy:0, jumping:false };
+  obstacles = []; dist = 0; speed = 340; spawnT = 0.8; rollT = 0;
+  running = true;
+  $('overlay').classList.remove('show');
+  $('hint').style.opacity = 1;
+}
+reset();
+
+const TYPES = ['block','low','bar'];
+function spawn(){
+  const type = TYPES[Math.floor(Math.random()*3)];
+  const lane = Math.floor(Math.random()*3)-1;
+  obstacles.push({ lane, z:1100, type,
+    color: type==='block' ? '#ff5c7a' : type==='low' ? '#ffb84d' : '#4dd2ff' });
+}
+
+function action(dir){
+  if(!running) return;
+  if(dir==='left'  && player.lane>-1) player.lane--;
+  if(dir==='right' && player.lane< 1) player.lane++;
+  if(dir==='up' && !player.jumping){ player.jumping=true; player.vy=780; }
+  if(dir==='down') rollT = 0.55;
+  flashGesture();
+}
+
+// ===== mouse gesture engine: accumulate movement, threshold = 100px =====
+let accX=0, accY=0, lastMove=0, cooldown=0;
+addEventListener('mousemove', e=>{
+  const dx = e.movementX!==undefined ? e.movementX : 0;
+  const dy = e.movementY!==undefined ? e.movementY : 0;
+  if(running){ accX+=dx; accY+=dy; lastMove=performance.now(); }
+});
+function checkGesture(){
+  if(!running) return;
+  if(performance.now()-lastMove>350){ accX=0; accY=0; } // decay ถ้าหยุดขยับ
+  const TH = 100; // threshold ตามที่นายเสนอ
+  if(cooldown>0){ cooldown-=1/60; return; }
+  if(Math.abs(accX)>TH || Math.abs(accY)>TH){
+    if(Math.abs(accX)>Math.abs(accY))
+      action(accX<0?'left':'right');
+    else
+      action(accY<0?'up':'down');
+    accX=0; accY=0; cooldown=0.18;
+  }
+}
+function flashGesture(){
+  const pct = Math.min(Math.abs(accX),100)/200 + 25;
+  $('gbar').style.width = Math.min(100, pct+50)+'%';
+  $('gbar').style.background = '#3ddc84';
+  setTimeout(()=>{ $('gbar').style.background='#7b7bff'; },200);
+}
+setInterval(()=>{
+  const m = Math.max(Math.abs(accX),Math.abs(accY));
+  $('gbar').style.width = (m/100*50)+'%';
+}, 80);
+
+// keyboard fallback
+addEventListener('keydown', e=>{
+  if(!running && (e.key==='Enter'||e.key===' ')) { reset(); return; }
+  const map = { ArrowLeft:'left', ArrowRight:'right', ArrowUp:'up', ArrowDown:'down' };
+  if(map[e.key]) action(map[e.key]);
+});
+
+$('restart').addEventListener('click', reset);
+$('fsbtn').addEventListener('click', ()=>{
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+});
+
+// hover effect สำหรับปุ่ม restart
+addEventListener('mousemove', e=>{
+  const el = document.elementFromPoint(e.clientX,e.clientY);
+  const h = el && el.closest ? el.closest('#restart') : null;
+  $('restart').classList.toggle('hovered', !!h);
+});
+
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(0.05,(now-last)/1000); last = now;
+  if(running){
+    checkGesture();
+    dist += speed*dt; speed += dt*12;
+    $('hud').textContent = '🏃 ' + Math.floor(dist) + 'm';
+    spawnT -= dt;
+    if(spawnT<=0){ spawn(); spawnT = Math.max(0.38, 0.95 - speed/1400); }
+
+    // physics
+    if(player.jumping){
+      player.y += player.vy*dt; player.vy -= 2200*dt;
+      if(player.y<=0){ player.y=0; player.jumping=false; }
+    }
+    if(rollT>0) rollT-=dt;
+
+    obstacles.forEach(o=> o.z -= speed*dt);
+    obstacles = obstacles.filter(o=> o.z>-60);
+
+    // collision
+    for(const o of obstacles){
+      if(o.z>-40 && o.z<70 && o.lane===player.lane){
+        const rolling = rollT>0;
+        const hit = (o.type==='block') ||
+                    (o.type==='low'  && player.y<40) ||
+                    (o.type==='bar'  && !rolling);
+        if(hit) crash();
+      }
+    }
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function crash(){
+  running = false;
+  $('flash').style.opacity = .55;
+  setTimeout(()=> $('flash').style.opacity = 0, 300);
+  $('ovscore').textContent = '🏃 ' + Math.floor(dist) + 'm · best this session';
+  $('overlay').classList.add('show');
+  $('hint').style.opacity = 0;
+}
+
+function draw(){
+  // sky
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#1a1a3f'); g.addColorStop(.6,'#2d1b4e'); g.addColorStop(1,'#0d0d1a');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+  // road
+  ctx.fillStyle = '#14142a';
+  ctx.beginPath();
+  ctx.moveTo(W/2 - W*0.30, HORIZON());
+  ctx.lineTo(W/2 + W*0.30, HORIZON());
+  ctx.lineTo(W/2 + W*0.46, GROUND()+40);
+  ctx.lineTo(W/2 - W*0.46, GROUND()+40);
+  ctx.closePath(); ctx.fill();
+
+  // lane lines
+  ctx.strokeStyle = 'rgba(123,123,255,.35)'; ctx.lineWidth = 2;
+  for(let z=0; z<1100; z+=90){
+    const dash = ((dist*0.9)%90);
+    const z1 = z - dash, z2 = z1 + 45;
+    if(z2<0) continue;
+    for(const ln of [-0.5, 0.5]){
+      ctx.beginPath();
+      ctx.moveTo(sX(ln,z1), sY(z1));
+      ctx.lineTo(sX(ln,z2), sY(z2));
+      ctx.stroke();
+    }
+  }
+
+  // obstacles (วาดไกล→ใกล้)
+  [...obstacles].sort((a,b)=>b.z-a.z).forEach(o=>{
+    const s = scale(o.z), x = sX(o.lane,o.z), y = sY(o.z);
+    const w = W*0.11*s*4, hgt = o.type==='bar' ? H*0.05*s*4 : H*0.13*s*4;
+    const oy = o.type==='bar' ? y - H*0.22*s*4 : y - hgt;
+    ctx.fillStyle = o.color;
+    ctx.shadowColor = o.color; ctx.shadowBlur = 20*s;
+    if(o.type==='bar'){
+      ctx.fillRect(x-w/2, oy, w, hgt);
+      ctx.fillRect(x-w/2, y-hgt, w*0.08, hgt);
+      ctx.fillRect(x+w/2-w*0.08, y-hgt, w*0.08, hgt);
+    } else {
+      ctx.fillRect(x-w/2, oy, w, hgt);
+      if(o.type==='low'){ ctx.fillStyle='rgba(0,0,0,.35)';
+        ctx.fillRect(x-w/2, oy, w, hgt*0.25); }
+    }
+    ctx.shadowBlur = 0;
+  });
+
+  // player
+  const px = sX(player.lane, 0), py = GROUND();
+  const rolling = rollT>0;
+  const pw = W*0.085, ph = rolling ? H*0.05 : H*0.12;
+  ctx.fillStyle = '#3ddc84';
+  ctx.shadowColor = '#3ddc84'; ctx.shadowBlur = 25;
+  ctx.beginPath();
+  ctx.roundRect(px-pw/2, py-player.y-ph, pw, ph, 8);
+  ctx.fill(); ctx.shadowBlur = 0;
+  ctx.fillStyle = '#0d2b1d';
+  ctx.beginPath();
+  ctx.arc(px, py-player.y-ph*0.75+ (rolling?0:ph*0.15), pw*0.18, 0, 7);
+  ctx.fill();
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
